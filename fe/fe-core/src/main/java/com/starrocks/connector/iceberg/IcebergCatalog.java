@@ -27,10 +27,12 @@ import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.memory.MemoryTrackable;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.AlterViewStmt;
+import org.apache.iceberg.BasePartitionStatisticsScan;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.MetadataTableUtils;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.PartitionStatistics;
 import org.apache.iceberg.PartitionsTable;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
@@ -379,12 +381,34 @@ public interface IcebergCatalog extends MemoryTrackable {
             }
         }
         if (lastUpdated ==  -1) {
+            lastUpdated = getPartitionLastUpdatedTimeFromStats(icebergTable, partitionName, snapshotId);
+        }
+        if (lastUpdated == -1) {
             // Fallback to current snapshot's timestamp if last_updated_at is null due to snapshot expiration.
             lastUpdated = getTableLastestSnapshotTime(icebergTable, logger);
             logger.warn("The table [{}] last_updated_at is null (snapshot [{}] may have been expired), " +
                     "using current snapshot timestamp: {}", nativeTable.name(), snapshotId, lastUpdated);
         }
         return lastUpdated;
+    }
+
+    private long getPartitionLastUpdatedTimeFromStats(IcebergTable icebergTable, String partitionName, long snapshotId) {
+        Table nativeTable = icebergTable.getNativeTable();
+        Logger logger = getLogger();
+        try (CloseableIterable<PartitionStatistics> partitionStats =
+                     new BasePartitionStatisticsScan(nativeTable).useSnapshot(snapshotId).scan()) {
+            for (PartitionStatistics stats : partitionStats) {
+                PartitionSpec spec = nativeTable.specs().get(stats.specId());
+                String statsPartitionName =
+                        PartitionUtil.convertIcebergPartitionToPartitionName(nativeTable, spec, stats.partition());
+                if (partitionName.equals(statsPartitionName)) {
+                    return stats.lastUpdatedAt();
+                }
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to get partition stats for table [{}] (snapshot [{}])", nativeTable.name(), snapshotId, e);
+        }
+        return -1;
     }
 
     private long getTableLastestSnapshotTime(IcebergTable icebergTable,
